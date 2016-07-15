@@ -2,4 +2,6 @@
 *.vcd
 work-obj93.cf
 
+*.vpi
+
 clk
