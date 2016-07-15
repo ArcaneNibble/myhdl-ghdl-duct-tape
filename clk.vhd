@@ -8,6 +8,8 @@ end entity;
 
 architecture behavior of clk is
     signal to_myhdl_o : std_logic := '0';
+    signal not_to_myhdl_o : std_logic := '0';
 begin
     to_myhdl_o <= not to_myhdl_o after 10 ns;
+    not_to_myhdl_o <= not not_to_myhdl_o after 20 ns;
 end architecture;
