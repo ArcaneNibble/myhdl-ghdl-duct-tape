@@ -474,8 +474,10 @@ static PLI_INT32 delta_callback(p_cb_data cb_data)
 {
   s_cb_data cb_data_s;
   s_vpi_time time_s;
-  vpiHandle reg_iter, reg_handle;
+  vpiHandle reg_handle;
   s_vpi_value value_s;
+  char *hexstr;
+  char binbuf[MAXLINE];
 
   if (delta == 0) {
     return(0);
@@ -484,22 +486,22 @@ static PLI_INT32 delta_callback(p_cb_data cb_data)
   /* skip time value */
   strtok(bufcp, " ");
 
-  reg_iter = vpi_iterate(vpiArgument, NULL);
-
-  value_s.format = vpiHexStrVal;
-  while ((value_s.value.str = strtok(NULL, " ")) != NULL) {
-    reg_handle = vpi_scan(reg_iter);
-    vpi_put_value(reg_handle, &value_s, NULL, vpiNoDelay);
+  int i = 0;
+  value_s.format = vpiBinStrVal;
+  while ((hexstr = strtok(NULL, " ")) != NULL) {
+    if (i < from_myhdl_net_count) {
+      reg_handle = from_myhdl_net_handle[i++];
+      hexstr2binstr(binbuf, hexstr);
+      value_s.value.str = binbuf;
+      vpi_put_value(reg_handle, &value_s, NULL, vpiNoDelay);
+    }
   }
-  if (reg_iter != NULL) {
-    vpi_free_object(reg_iter);
-  }
 
-  // register readonly callback //
+  // register readwrite callback //
   time_s.type = vpiSimTime;
   time_s.high = 0;
   time_s.low = 0;
-  cb_data_s.reason = cbReadOnlySynch;
+  cb_data_s.reason = cbReadWriteSynch;
   cb_data_s.user_data = NULL;
   cb_data_s.cb_rtn = readonly_callback;
   cb_data_s.obj = NULL;
@@ -533,28 +535,6 @@ static PLI_INT32 change_callback(p_cb_data cb_data)
 
 void myhdl_register()
 {
-    /*char outtmp[100];
-    hexstr2binstr(outtmp, "0");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "1");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "A");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "X");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "Z");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "b");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "x");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "z");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "0123456789abcdefxz");
-    puts(outtmp);
-    hexstr2binstr(outtmp, "0123456789ABCDEFZX");
-    puts(outtmp);*/
-
     s_cb_data cb;
 
     // Normally the MyHDL VPI would register two systf here that the HDL calls.
