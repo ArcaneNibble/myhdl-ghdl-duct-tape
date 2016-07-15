@@ -1,0 +1,3 @@
+Ugly glue between GHDL and MyHDL cosimulation
+
+Uses VPI because GHDL's VHPI interface requires Ada.
