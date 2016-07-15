@@ -63,14 +63,12 @@ static int init_pipes()
 static PLI_INT32 endofcompile_callback(p_cb_data cb_data) {
     vpiHandle top_iter = vpi_iterate(vpiModule, NULL);
     vpiHandle top_module = vpi_scan(top_iter);
-    fprintf(stderr, "top_module is %p\n", top_module);
 
     // Start iterating nets
     vpiHandle net_iter = vpi_iterate(vpiNet, top_module);
     vpiHandle net_handle;
     while ((net_handle = vpi_scan(net_iter))) {
         char *name = vpi_get_str(vpiName, net_handle);
-        fprintf(stderr, "net %s\n", name);
         if (startswith(name, "to_myhdl_")) {
             if (to_myhdl_net_count == MAXARGS) {
                 vpi_printf("ERROR: Too many to_myhdl nets\n");
@@ -84,14 +82,6 @@ static PLI_INT32 endofcompile_callback(p_cb_data cb_data) {
             }
             from_myhdl_net_handle[from_myhdl_net_count++] = net_handle;
         }
-    }
-
-    // debug
-    for (int i = 0; i < to_myhdl_net_count; i++) {
-        fprintf(stderr, "to_myhdl handle %p\n", to_myhdl_net_handle[i]);
-    }
-    for (int i = 0; i < from_myhdl_net_count; i++) {
-        fprintf(stderr, "from_myhdl handle %p\n", from_myhdl_net_handle[i]);
     }
 
     return(0);
