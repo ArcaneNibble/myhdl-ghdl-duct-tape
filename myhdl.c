@@ -316,7 +316,8 @@ static PLI_INT32 startofsimulation_callback(p_cb_data cb_data) {
     delta = 0;
 
     // register read-write callback //
-    // GHDL maps RO synch to EndOfTimeStep, which is too late.
+    // GHDL maps RO synch to EndOfTimeStep, which is too late because of
+    // TODO XXX reasons???.
     // It maps RW synch to LastKnownDelta, which runs before postponed
     // processes but otherwise is early enough.
     time_s.type = vpiSimTime;
