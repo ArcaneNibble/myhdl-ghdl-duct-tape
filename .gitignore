@@ -1,0 +1,5 @@
+*.o
+*.vcd
+work-obj93.cf
+
+clk
