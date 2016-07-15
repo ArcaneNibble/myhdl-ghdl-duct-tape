@@ -9,6 +9,9 @@
 #define MAXWIDTH 10
 #define MAXARGS 1024
 
+/* 64 bit type for time calculations */
+typedef unsigned long long myhdl_time64_t;
+
 static int rpipe;
 static int wpipe;
 
@@ -18,17 +21,110 @@ int from_myhdl_net_count, to_myhdl_net_count;
 
 static char changeFlag[MAXARGS];
 
+// A copy of the receive buffer used for handling data from MyHDL
+static char bufcp[MAXLINE];
+
+static myhdl_time64_t myhdl_time;
+static myhdl_time64_t verilog_time;
+static myhdl_time64_t pli_time;
+static int delta;
+
 /* prototypes */
 static PLI_INT32 endofcompile_callback(p_cb_data cb_data);
 static PLI_INT32 startofsimulation_callback(p_cb_data cb_data);
+static PLI_INT32 readonly_callback(p_cb_data cb_data);
+static PLI_INT32 delay_callback(p_cb_data cb_data);
+static PLI_INT32 delta_callback(p_cb_data cb_data);
 static PLI_INT32 change_callback(p_cb_data cb_data);
 
 static int init_pipes();
 
+static myhdl_time64_t timestruct_to_time(const struct t_vpi_time*ts);
 static inline int startswith(const char *s, const char *prefix);
+static void binstr2hexstr(char *out, const char *in);
 
 static inline int startswith(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static void binstr2hexstr(char *out, const char *in) {
+    char *out_orig = out;
+    const char *in_orig = in;
+    in = in + strlen(in);
+    // In points to terminating null
+    int nybble_count = 0;
+    int nybble_temp = -1;
+    const char * const nybble_lut = "0123456789ABCDEFZX";
+
+    while ((in--) != in_orig) {
+        // In points to a valid character
+        switch(*in) {
+            case '0':
+                if (nybble_temp == -1) {
+                    nybble_temp = 0;
+                }
+                // If Z/X then keep as Z/X
+                // If valid val then don't need to do anything; it contains
+                // all the needed zeros already.
+                break;
+            case '1':
+                if (nybble_temp == -1) {
+                    nybble_temp = (1 << nybble_count);
+                } else if (nybble_temp != 16 && nybble_temp != 17) {
+                    nybble_temp |= (1 << nybble_count);
+                }
+                // If Z/X then keep as Z/X
+                break;
+            case 'Z':
+                if (nybble_temp == -1) {
+                    nybble_temp = 16;
+                } else if (nybble_temp != 16) {
+                    nybble_temp = 17;
+                }
+                // By default, make it Z
+                // If there is still a Z keep it
+                // If there is anything else make it X
+                break;
+            default:
+                // Anything else is an X
+                nybble_temp = 17;
+                break;
+        }
+
+        nybble_count++;
+        if (nybble_count == 4) {
+            assert(nybble_temp >= 0 && nybble_temp <= 17);
+            *(out++) = nybble_lut[nybble_temp];
+            nybble_count = 0;
+            nybble_temp = -1;
+        }
+    }
+
+    // Dump out last nybble
+    if (nybble_count != 0) {
+        assert(nybble_temp >= 0 && nybble_temp <= 17);
+        *(out++) = nybble_lut[nybble_temp];
+    }
+
+    // Need to flip the output the right way around
+    int len = out - out_orig;
+    for (int i = 0; i < len / 2; i++) {
+        char tmp = out_orig[i];
+        out_orig[i] = out[-i - 1];
+        out[-i - 1] = tmp;
+    }
+
+    // Put a null
+    *out = '\0';
+}
+
+/* from Icarus */
+static myhdl_time64_t timestruct_to_time(const struct t_vpi_time*ts)
+{
+      myhdl_time64_t ti = ts->high;
+      ti <<= 32;
+      ti += ts->low & 0xffffffff;
+      return ti;
 }
 
 // FIXME: The "early" vpiFinish don't work. What to do???
@@ -155,7 +251,219 @@ static PLI_INT32 startofsimulation_callback(p_cb_data cb_data) {
         vpi_register_cb(&cb_data_s);
     }
 
+    pli_time = 0;
+    delta = 0;
+
+    // register read-write callback //
+    // GHDL maps RO synch to EndOfTimeStep, which is too late.
+    // It maps RW synch to LastKnownDelta, which runs before postponed
+    // processes but otherwise is early enough.
+    time_s.type = vpiSimTime;
+    time_s.high = 0;
+    time_s.low = 0;
+    cb_data_s.reason = cbReadWriteSynch;
+    cb_data_s.user_data = NULL;
+    cb_data_s.cb_rtn = readonly_callback;
+    cb_data_s.obj = NULL;
+    cb_data_s.time = &time_s;
+    cb_data_s.value = NULL;
+    vpi_register_cb(&cb_data_s);
+
+    // pre-register delta cycle callback //
+    delta = 0;
+    time_s.type = vpiSimTime;
+    time_s.high = 0;
+    time_s.low = 1;
+    cb_data_s.reason = cbAfterDelay;
+    cb_data_s.user_data = NULL;
+    cb_data_s.cb_rtn = delta_callback;
+    cb_data_s.obj = NULL;
+    cb_data_s.time = &time_s;
+    cb_data_s.value = NULL;
+    vpi_register_cb(&cb_data_s);
+
     return(0);
+}
+
+
+static PLI_INT32 readonly_callback(p_cb_data cb_data)
+{
+  vpiHandle net_iter, net_handle;
+  s_cb_data cb_data_s;
+  s_vpi_time verilog_time_s;
+  s_vpi_value value_s;
+  s_vpi_time time_s;
+  char buf[MAXLINE];
+  int n;
+  int i;
+  char *myhdl_time_string;
+  myhdl_time64_t delay;
+
+  static int start_flag = 1;
+
+  if (start_flag) {
+    start_flag = 0;
+    n = write(wpipe, "START", 5);  
+    // vpi_printf("INFO: RO cb at start-up\n");
+    if ((n = read(rpipe, buf, MAXLINE)) == 0) {
+      vpi_printf("ABORT from RO cb at start-up\n");
+      vpi_control(vpiFinish, 1);  /* abort simulation */
+    }  
+    assert(n > 0);
+  }
+
+  buf[0] = '\0';
+  verilog_time_s.type = vpiSimTime;
+  vpi_get_time(NULL, &verilog_time_s);
+  verilog_time = timestruct_to_time(&verilog_time_s);
+   if (verilog_time != (pli_time * 1000 + delta)) {
+     vpi_printf("%u %u\n", verilog_time_s.high, verilog_time_s.low );
+     vpi_printf("%llu %llu %d\n", verilog_time, pli_time, delta);
+   }
+  assert( (verilog_time & 0xFFFFFFFF) == ( (pli_time * 1000 + delta) & 0xFFFFFFFF ) );
+  sprintf(buf, "%llu ", pli_time);
+  net_iter = vpi_iterate(vpiArgument, NULL);
+  value_s.format = vpiHexStrVal;
+  i = 0;
+  while ((net_handle = vpi_scan(net_iter)) != NULL) {
+    if (changeFlag[i]) {
+      strcat(buf, vpi_get_str(vpiName, net_handle));
+      strcat(buf, " ");
+      vpi_get_value(net_handle, &value_s);
+      strcat(buf, value_s.value.str);
+      strcat(buf, " ");
+      changeFlag[i] = 0;
+    }
+    i++;
+  }
+  n = write(wpipe, buf, strlen(buf));
+  if ((n = read(rpipe, buf, MAXLINE)) == 0) {
+    // vpi_printf("ABORT from RO cb\n");
+    vpi_control(vpiFinish, 1);  /* abort simulation */
+    return(0);
+  }
+  assert(n > 0);
+  buf[n] = '\0';
+
+  /* save copy for later callback */
+  strcpy(bufcp, buf);
+
+  myhdl_time_string = strtok(buf, " ");
+  myhdl_time = (myhdl_time64_t) strtoull(myhdl_time_string, (char **) NULL, 10);
+  delay = (myhdl_time - pli_time) * 1000;
+  assert(delay >= 0);
+  assert(delay <= 0xFFFFFFFF);
+  if (delay > 0) { // schedule cbAfterDelay callback
+    assert(delay > delta);
+    delay -= delta;
+    /* Icarus 20030518 runs RO callbacks when time has already advanced */
+    /* Therefore, one had to compensate for the prescheduled delta callback */
+    /* delay -= 1; */
+    /* Icarus 20031009 has a different scheduler, more correct I believe */
+    /* compensation is no longer necessary */
+    delta = 0;
+    pli_time = myhdl_time;
+
+    // register cbAfterDelay callback //
+    time_s.type = vpiSimTime;
+    time_s.high = 0;
+    time_s.low = (PLI_UINT32) delay;
+    cb_data_s.reason = cbAfterDelay;
+    cb_data_s.user_data = NULL;
+    cb_data_s.cb_rtn = delay_callback;
+    cb_data_s.obj = NULL;
+    cb_data_s.time = &time_s;
+    cb_data_s.value = NULL;
+    vpi_register_cb(&cb_data_s);
+  } else {
+    delta++;
+    assert(delta < 1000);
+  }
+  return(0);
+}
+
+static PLI_INT32 delay_callback(p_cb_data cb_data)
+{
+  s_vpi_time time_s;
+  s_cb_data cb_data_s;
+
+  // register readonly callback //
+  time_s.type = vpiSimTime;
+  time_s.high = 0;
+  time_s.low = 0;
+  cb_data_s.reason = cbReadOnlySynch;
+  cb_data_s.user_data = NULL;
+  cb_data_s.cb_rtn = readonly_callback;
+  cb_data_s.obj = NULL;
+  cb_data_s.time = &time_s;
+  cb_data_s.value = NULL;
+  vpi_register_cb(&cb_data_s);
+
+  // register delta callback //
+  time_s.type = vpiSimTime;
+  time_s.high = 0;
+  time_s.low = 1;
+  cb_data_s.reason = cbAfterDelay;
+  cb_data_s.user_data = NULL;
+  cb_data_s.cb_rtn = delta_callback;
+  cb_data_s.obj = NULL;
+  cb_data_s.time = &time_s;
+  cb_data_s.value = NULL;
+  vpi_register_cb(&cb_data_s);
+
+  return(0);
+}
+
+static PLI_INT32 delta_callback(p_cb_data cb_data)
+{
+  s_cb_data cb_data_s;
+  s_vpi_time time_s;
+  vpiHandle reg_iter, reg_handle;
+  s_vpi_value value_s;
+
+  if (delta == 0) {
+    return(0);
+  }
+
+  /* skip time value */
+  strtok(bufcp, " ");
+
+  reg_iter = vpi_iterate(vpiArgument, NULL);
+
+  value_s.format = vpiHexStrVal;
+  while ((value_s.value.str = strtok(NULL, " ")) != NULL) {
+    reg_handle = vpi_scan(reg_iter);
+    vpi_put_value(reg_handle, &value_s, NULL, vpiNoDelay);
+  }
+  if (reg_iter != NULL) {
+    vpi_free_object(reg_iter);
+  }
+
+  // register readonly callback //
+  time_s.type = vpiSimTime;
+  time_s.high = 0;
+  time_s.low = 0;
+  cb_data_s.reason = cbReadOnlySynch;
+  cb_data_s.user_data = NULL;
+  cb_data_s.cb_rtn = readonly_callback;
+  cb_data_s.obj = NULL;
+  cb_data_s.time = &time_s;
+  cb_data_s.value = NULL;
+  vpi_register_cb(&cb_data_s);
+
+  // register delta callback //
+  time_s.type = vpiSimTime;
+  time_s.high = 0;
+  time_s.low = 1;
+  cb_data_s.reason = cbAfterDelay;
+  cb_data_s.user_data = NULL;
+  cb_data_s.cb_rtn = delta_callback;
+  cb_data_s.obj = NULL;
+  cb_data_s.time = &time_s;
+  cb_data_s.value = NULL;
+  vpi_register_cb(&cb_data_s);
+
+  return(0);
 }
 
 static PLI_INT32 change_callback(p_cb_data cb_data)
@@ -169,6 +477,30 @@ static PLI_INT32 change_callback(p_cb_data cb_data)
 
 void myhdl_register()
 {
+    /*char outtest[100];
+    binstr2hexstr(outtest, "0");
+    puts(outtest);
+    binstr2hexstr(outtest, "1");
+    puts(outtest);
+    binstr2hexstr(outtest, "X");
+    puts(outtest);
+    binstr2hexstr(outtest, "Z");
+    puts(outtest);
+    binstr2hexstr(outtest, "10");
+    puts(outtest);
+    binstr2hexstr(outtest, "101");
+    puts(outtest);
+    binstr2hexstr(outtest, "1010");
+    puts(outtest);
+    binstr2hexstr(outtest, "10101");
+    puts(outtest);
+    binstr2hexstr(outtest, "1ZZZZ");
+    puts(outtest);
+    binstr2hexstr(outtest, "1ZZZZ0101ZZZZ");
+    puts(outtest);
+    binstr2hexstr(outtest, "1ZZZZ0101ZZZ1");
+    puts(outtest);*/
+
     s_cb_data cb;
 
     // Normally the MyHDL VPI would register two systf here that the HDL calls.
