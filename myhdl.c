@@ -42,11 +42,14 @@ static int init_pipes();
 static myhdl_time64_t timestruct_to_time(const struct t_vpi_time*ts);
 static inline int startswith(const char *s, const char *prefix);
 static void binstr2hexstr(char *out, const char *in);
+static void hexstr2binstr(char *out, const char *in);
 
 static inline int startswith(const char *s, const char *prefix) {
     return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
+// This function is needed because MyHDL wants signals encoded as hex, but the
+// GHDL VPI interface supports only binary.
 static void binstr2hexstr(char *out, const char *in) {
     char *out_orig = out;
     const char *in_orig = in;
@@ -58,7 +61,7 @@ static void binstr2hexstr(char *out, const char *in) {
 
     while ((in--) != in_orig) {
         // In points to a valid character
-        switch(*in) {
+        switch (*in) {
             case '0':
                 if (nybble_temp == -1) {
                     nybble_temp = 0;
@@ -112,6 +115,64 @@ static void binstr2hexstr(char *out, const char *in) {
         char tmp = out_orig[i];
         out_orig[i] = out[-i - 1];
         out[-i - 1] = tmp;
+    }
+
+    // Put a null
+    *out = '\0';
+}
+
+// This function is here for the same reason. It puts out extra bits, but that
+// should be ok
+static void hexstr2binstr(char *out, const char *in) {
+    char c;
+    while ((c = *(in++))) {
+        switch (c) {
+            case 'a':
+            case 'b':
+            case 'c':
+            case 'd':
+            case 'e':
+            case 'f':
+                // Make it uppercase
+                c = c & ~0x20;
+            case 'A':
+            case 'B':
+            case 'C':
+            case 'D':
+            case 'E':
+            case 'F':
+                c = c - ('A' - '0') + 10;
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+                c = c - '0';
+
+                *(out++) = c & (1 << 3) ? '1' : '0';
+                *(out++) = c & (1 << 2) ? '1' : '0';
+                *(out++) = c & (1 << 1) ? '1' : '0';
+                *(out++) = c & (1 << 0) ? '1' : '0';
+                break;
+            case 'z':
+            case 'Z':
+                *(out++) = 'Z';
+                *(out++) = 'Z';
+                *(out++) = 'Z';
+                *(out++) = 'Z';
+                break;
+            default:
+                *(out++) = 'X';
+                *(out++) = 'X';
+                *(out++) = 'X';
+                *(out++) = 'X';
+                break;
+        }
     }
 
     // Put a null
@@ -270,7 +331,6 @@ static PLI_INT32 startofsimulation_callback(p_cb_data cb_data) {
     vpi_register_cb(&cb_data_s);
 
     // pre-register delta cycle callback //
-    delta = 0;
     time_s.type = vpiSimTime;
     time_s.high = 0;
     time_s.low = 1;
@@ -288,12 +348,14 @@ static PLI_INT32 startofsimulation_callback(p_cb_data cb_data) {
 
 static PLI_INT32 readonly_callback(p_cb_data cb_data)
 {
-  vpiHandle net_iter, net_handle;
+  vpiHandle net_handle;
   s_cb_data cb_data_s;
   s_vpi_time verilog_time_s;
   s_vpi_value value_s;
   s_vpi_time time_s;
   char buf[MAXLINE];
+  // FIXME: Way oversize, unsafe due to buffer overflow
+  char hexbuf[MAXLINE];
   int n;
   int i;
   char *myhdl_time_string;
@@ -322,19 +384,18 @@ static PLI_INT32 readonly_callback(p_cb_data cb_data)
    }
   assert( (verilog_time & 0xFFFFFFFF) == ( (pli_time * 1000 + delta) & 0xFFFFFFFF ) );
   sprintf(buf, "%llu ", pli_time);
-  net_iter = vpi_iterate(vpiArgument, NULL);
-  value_s.format = vpiHexStrVal;
-  i = 0;
-  while ((net_handle = vpi_scan(net_iter)) != NULL) {
+  value_s.format = vpiBinStrVal;
+  for (i = 0; i < to_myhdl_net_count; i++) {
     if (changeFlag[i]) {
+      net_handle = to_myhdl_net_handle[i];
       strcat(buf, vpi_get_str(vpiName, net_handle));
       strcat(buf, " ");
       vpi_get_value(net_handle, &value_s);
-      strcat(buf, value_s.value.str);
+      binstr2hexstr(hexbuf, value_s.value.str);
+      strcat(buf, hexbuf);
       strcat(buf, " ");
       changeFlag[i] = 0;
     }
-    i++;
   }
   n = write(wpipe, buf, strlen(buf));
   if ((n = read(rpipe, buf, MAXLINE)) == 0) {
@@ -356,11 +417,6 @@ static PLI_INT32 readonly_callback(p_cb_data cb_data)
   if (delay > 0) { // schedule cbAfterDelay callback
     assert(delay > delta);
     delay -= delta;
-    /* Icarus 20030518 runs RO callbacks when time has already advanced */
-    /* Therefore, one had to compensate for the prescheduled delta callback */
-    /* delay -= 1; */
-    /* Icarus 20031009 has a different scheduler, more correct I believe */
-    /* compensation is no longer necessary */
     delta = 0;
     pli_time = myhdl_time;
 
@@ -387,11 +443,11 @@ static PLI_INT32 delay_callback(p_cb_data cb_data)
   s_vpi_time time_s;
   s_cb_data cb_data_s;
 
-  // register readonly callback //
+  // register readwrite callback //
   time_s.type = vpiSimTime;
   time_s.high = 0;
   time_s.low = 0;
-  cb_data_s.reason = cbReadOnlySynch;
+  cb_data_s.reason = cbReadWriteSynch;
   cb_data_s.user_data = NULL;
   cb_data_s.cb_rtn = readonly_callback;
   cb_data_s.obj = NULL;
@@ -477,29 +533,27 @@ static PLI_INT32 change_callback(p_cb_data cb_data)
 
 void myhdl_register()
 {
-    /*char outtest[100];
-    binstr2hexstr(outtest, "0");
-    puts(outtest);
-    binstr2hexstr(outtest, "1");
-    puts(outtest);
-    binstr2hexstr(outtest, "X");
-    puts(outtest);
-    binstr2hexstr(outtest, "Z");
-    puts(outtest);
-    binstr2hexstr(outtest, "10");
-    puts(outtest);
-    binstr2hexstr(outtest, "101");
-    puts(outtest);
-    binstr2hexstr(outtest, "1010");
-    puts(outtest);
-    binstr2hexstr(outtest, "10101");
-    puts(outtest);
-    binstr2hexstr(outtest, "1ZZZZ");
-    puts(outtest);
-    binstr2hexstr(outtest, "1ZZZZ0101ZZZZ");
-    puts(outtest);
-    binstr2hexstr(outtest, "1ZZZZ0101ZZZ1");
-    puts(outtest);*/
+    /*char outtmp[100];
+    hexstr2binstr(outtmp, "0");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "1");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "A");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "X");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "Z");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "b");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "x");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "z");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "0123456789abcdefxz");
+    puts(outtmp);
+    hexstr2binstr(outtmp, "0123456789ABCDEFZX");
+    puts(outtmp);*/
 
     s_cb_data cb;
 
