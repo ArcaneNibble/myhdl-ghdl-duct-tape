@@ -2,7 +2,10 @@
 *.vcd
 work-obj93.cf
 
+*.pyc
+
 *.vpi
 
 clk
 muxtest
+test/dut_bin2gray
