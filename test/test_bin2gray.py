@@ -31,6 +31,12 @@ class TestOriginalGrayCode(TestCase):
                 Rn.append(bin(G, width=n))
         
         Ln = ['0', '1'] # n == 1
+        Ln = nextLn(Ln)
+        Ln = nextLn(Ln)
+        Ln = nextLn(Ln)
+        Ln = nextLn(Ln)
+        Ln = nextLn(Ln)
+        Ln = nextLn(Ln) # n == 7
         for n in [8]:
             Ln = nextLn(Ln)
             del Rn[:]
