@@ -8,4 +8,4 @@ ghdl -e muxtest
 # Um, yeah... about this...
 iverilog-vpi myhdl.c
 
-MYHDL_TO_PIPE=0 MYHDL_FROM_PIPE=1 ./muxtest --stop-time=200ns --vcd=muxtest.vcd --vpi=./myhdl.vpi
+MYHDL_TO_PIPE=0 MYHDL_FROM_PIPE=1 ./muxtest --vcd=muxtest.vcd --vpi=./myhdl.vpi
