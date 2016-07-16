@@ -1,3 +1,6 @@
 Ugly glue between GHDL and MyHDL cosimulation
 
 Uses VPI because GHDL's VHPI interface requires Ada.
+
+Instead of using $to_myhdl and $from_myhdl, you need to prefix your signals
+with to_myhdl_ and from_myhdl_ instead.
